@@ -256,7 +256,7 @@ class session():
             ]
         idx = 1
         for b in self.boards:
-            latex_cmd.append(b.to_latex())
+            latex_cmd += [r'\vspace{0.3mm}',b.to_latex()]
             
             if idx == self.n_boards: break
             
