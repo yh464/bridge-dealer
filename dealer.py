@@ -114,11 +114,14 @@ class board():
             'DIAMONDS',hand['D']).replace('CLUBS',hand['C'])
         return latex_cmd
     
-    def _dds_to_latex(self):
+    def _dds_to_latex(self, contract = False):
         latex_cmd = [r'\footnotesize{\begin{tabular}{cccccc}',
                      r'&$\clubsuit$&$\diamondsuit$&$\heartsuit$&$\spadesuit$&N\\']
         for x in ['N','S','E','W']:
-            tmp = self.dd.loc[x,:].astype(str).tolist()
+            if contract:
+                tmp = (self.dd.loc[x,:] - 6).astype(str).replace(
+                    [str(i) for i in range(-6,1)], '-').tolist()
+            else: tmp = self.dd.loc[x,:].astype(str).tolist()
             tmp = [x] + tmp
             tmp = '&'.join(tmp) + r'\\'
             latex_cmd.append(tmp)
@@ -144,7 +147,7 @@ class board():
             ]
         return '\n'.join(pbn_string)
     
-    def to_latex(self):
+    def to_latex(self, contract):
         latex_cmd = [
             # first row: board number, north hand, information
             r'\begin{tabular}{@{}m{9mm} m{22mm} m{15mm}@{}}',
@@ -166,21 +169,22 @@ class board():
                 'E',str(self.info.loc['E','HCP'])).replace(
                 'S',str(self.info.loc['S','HCP'])),
             self._hand_to_latex(self.tabular.loc['S',:])+r'&',
-            self._dds_to_latex(),
+            self._dds_to_latex(contract),
             r'\end{tabular}'
             ]
         return '\n'.join(latex_cmd)
 
 class session():
-    def __init__(self, prefix, n_boards = 24):
+    def __init__(self, prefix, n_boards = 24, force = False, **kwargs):
         if os.path.dirname(prefix) == '': prefix = './' + prefix
         self.prefix = prefix
-        if os.path.isfile(f'{prefix}.pbn'):
+        if os.path.isfile(f'{prefix}.pbn') and not force:
             self._parse_pbn()
         else:
             self.boards = [None] * n_boards
             self.n_boards = n_boards
             self.recap = None
+            self.generate(**kwargs)
             
     def _parse_pbn(self):
         pbn = open(f'{self.prefix}.pbn').read().splitlines()
@@ -233,7 +237,7 @@ class session():
         latex_cmd+= [r'\end{tabular}', r'\end{table}']
         return '\n'.join(latex_cmd)
     
-    def to_latex(self, title = None, pdflatex = 'c:/texlive/2024/bin/windows/pdflatex.exe'):
+    def to_latex(self, title = None, contract = False, pdflatex = 'c:/texlive/2024/bin/windows/pdflatex.exe'):
         if title == None: title = os.path.basename(self.prefix)
         latex_cmd = [
             r'\documentclass[9pt]{article}',
@@ -256,7 +260,7 @@ class session():
             ]
         idx = 1
         for b in self.boards:
-            latex_cmd += [r'\vspace{0.3mm}',b.to_latex()]
+            latex_cmd += [r'\vspace{0.3mm}',b.to_latex(contract)]
             
             if idx == self.n_boards: break
             
@@ -296,14 +300,15 @@ class session():
                 print(b.to_pbn(), file = f)
                 print(file = f)
     
-    def generate(self, mode = 'random', n = None, epsilon = 2):
-        if mode not in ['goulash','balanced','long','slams','game','partscore']:
+    def generate(self, mode = 'random', n = None, epsilon = 2, bias = 0.2, contract = False):
+        if mode not in ['goulash','misfit','balanced','long','slams','game','partscore']:
             mode = 'random'
             
         if n == None:
             n = self.n_boards if mode == 'random' else self.n_boards * 10
         
-        def dealscore(pbn, mode, epsilon):
+        def dealscore(pbn, mode, epsilon, bias = 0.2):
+            '''bias = prefer single suit over two-suited hand for goulash dealer'''
             rng = np.random.Generator(np.random.PCG64()) # again reset RNG with secrets.randbits
             eps = rng.normal(loc = 0, scale = epsilon)
             
@@ -314,28 +319,36 @@ class session():
                 hcpd = hcps[0]+hcps[2]-hcps[1]-hcps[3]
                 if mode == 'slams': return abs(hcpd)+eps
                 else: return abs(hcpd - 11) + eps
-            if mode in ['goulash','balanced','long']:
-                shape = [sorted([len(y) for y in x.split('.')]) for x in hands]
+            if mode in ['goulash','balanced','long','misfit']:
+                shape = [[len(y) for y in x.split('.')] for x in hands]
                 if mode == 'long':
-                    return sum([x[-1] for x in shape]) + eps
+                    return sum([max(x) for x in shape]) + eps
                 else:
-                    gparams = [x[-1] + x[-2] - x[0] - x[1] for x in shape]
+                    fit_ns = max([shape[0][x] + shape[2][x] for x in range(4)])
+                    fit_ew = max([shape[1][x] + shape[3][x] for x in range(4)])
+                    fit_ns = min(fit_ns, 9); fit_ew = min(fit_ew, 9)
+                    # fit_ns = -1/(fit_ns - 6.5); fit_ew = -1/(fit_ew - 6.5)
+                    fit_ns = 1/(9.1-fit_ns); fit_ew = 1/(9.1-fit_ew)
+                    gparams = [(1+bias)*x[-1] + (1-bias)*x[-2] - x[0] for x in shape]
                     if mode == 'goulash': return sum(gparams) + eps
+                    elif mode == 'misfit': return sum(gparams) - (fit_ns+fit_ew) + eps
                     else: return -sum(gparams) + eps
         
         all_deals = []
         for _ in range(n):
             pbn = shuffle()
             all_deals.append(pd.DataFrame(dict(
-                pbn = [pbn], score = dealscore(pbn, mode = mode, epsilon = epsilon)
+                pbn = [pbn], score = dealscore(pbn, mode = mode, epsilon = epsilon, bias = bias)
                 )))
         all_deals = pd.concat(all_deals).sort_values(by = 'score', ascending = False).reset_index(drop = True)
         for o, idx in zip(np.random.permutation(self.n_boards), range(self.n_boards)):
             self.boards[idx] = board(idx+1, all_deals['pbn'].iloc[o])
+        all_deals['used'] = False; all_deals.iloc[:self.n_boards,-1] = True
         
+        self.diag_table = all_deals
         self.recap = self._calc_recap()
         self.to_pbn(force = True)
-        self.latex = self.to_latex()
+        self.latex = self.to_latex(contract = contract)
 
 # ses = session('test', n_boards = 24)
 # ses.generate(mode = 'goulash', n = 10000, epsilon = 0)
