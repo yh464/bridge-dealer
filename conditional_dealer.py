@@ -520,8 +520,10 @@ class Dealer():
         # hence, only the first n_avail_to_restricted_hand cards in each suit are eligible to be dealt to the constrained hand
         avail_to_restricted_hand = []
         for suit in range(4):
-            if constraint.suit_max[suit] == 13: continue
             available_cards = np.where(~hand.array_rep[:,suit,:].any(axis=0))[0]
+            if constraint.suit_max[suit] == 13: 
+                avail_to_restricted_hand.append(np.stack((np.ones(len(available_cards))*suit,
+                                                          available_cards)).T)
             self.rng.shuffle(available_cards)
             n_avail_to_restricted_hand = constraint.suit_max[suit] - hand.array_rep[constraint.hand, suit,:].sum()
             avail_to_restricted_hand.append(np.stack((np.ones(n_avail_to_restricted_hand)*suit, 
@@ -813,9 +815,9 @@ class Simulator():
 
 # test usage
 if __name__ == '__main__':
-    a = parse_string('north 4441 13-18P south 3+S 4+H 14+HCP hascard HA')
-    test = Constraint(SingleHandShapeConstraint(0, 5, 2, False), HCPConstraint([13,37,37,37],[10,0,0,0])) # 1NT
-    test = Constraint(None, HCPConstraint(hcp_min = [16,0,0,0])) # 1C
+    # a = parse_string('north 4441 13-18P south 3+S 4+H 14+HCP hascard HA')
+    # test = Constraint(SingleHandShapeConstraint(0, 5, 2, False), HCPConstraint([13,37,37,37],[10,0,0,0])) # 1NT
+    # test = Constraint(None, HCPConstraint(hcp_min = [16,0,0,0])) # 1C
     # test = Constraint()
     # test = Constraint(ShapeConstraint(
     #     shape_max = np.array([[5, 5, 5, 5],
@@ -836,6 +838,9 @@ if __name__ == '__main__':
     #                           [0, 0, 0, 0]]),
     #     permute_suits = False
     # ), HCPConstraint([37,37,37,37],[0,0,0,0]))
-    dealer = Simulator(constraint = test).deal(5000)
+    # dealer = Simulator(constraint = test).deal(5000)
+    dealer = Simulator(
+        *parse_string('north 10-P east 11-P south 2+S 2+H 2+D 2+C 10-13P')
+        ).deal(5000)
     dealer.check(Constraint(None,HCPConstraint([37,37,37,37],[0,15,0,0])))
     dealer.solve_dds()
