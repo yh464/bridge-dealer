@@ -1,14 +1,15 @@
 from time import perf_counter
 from tqdm import tqdm
 import numpy as np
-import pandas as pd
 import scipy.special as sp
-import types
-import re
-import ctypes
-import dds
+import types, re, dds, ctypes
+from multiprocessing import Pool, cpu_count
 
 def map_id_to_card(id:int): return (id // 13, id % 13) # returns (suit, rank)
+
+def _dataframe_str(data, columns = ['S','H','D','C'], index = ['N','E','S','W']):
+    return '  '+''.join([str(c).rjust(3) for c in columns]) + '\n' + \
+        '\n'.join([str(index[i]).ljust(2) + ''.join([str(data[i,j]).rjust(3) for j in range(data.shape[1])]) for i in range(data.shape[0])])
 
 class Hand():
     def __init__(
@@ -246,9 +247,9 @@ class ShapeConstraint():
 
     def __str__(self):
         out = ['Shape constraint:', 'Max number of cards:',
-               pd.DataFrame(self.shape_max, columns=['S','H','D','C'], index=['N','E','S','W']).__str__(),
+               _dataframe_str(self.shape_max, columns=['S','H','D','C'], index=['N','E','S','W']).__str__(),
                'Min number of cards:',
-               pd.DataFrame(self.shape_min, columns=['S','H','D','C'], index=['N','E','S','W']).__str__(),
+               _dataframe_str(self.shape_min, columns=['S','H','D','C'], index=['N','E','S','W']).__str__(),
                'Following suits can be exchanged:',
                ', '.join(np.array(['S','H','D','C'])[self.permute_suits.permutable].tolist())]
         return '\n'.join(out)
@@ -753,6 +754,21 @@ class Dealer():
         print(f'Dealt {n} hands in {end-start:.2f} seconds ({n/(end-start):.2f} hands/second).')
         return deals
 
+def solve_one_board(pbn:str):
+    solver = dds.ddTableDealPBN()
+    resTable = ctypes.pointer(dds.ddTableResults())
+    dds.SetMaxThreads(0)
+    ctypes.create_string_buffer(80)
+    solver.cards = bytes(pbn, 'utf-8')
+    dds.CalcDDtablePBN(solver, resTable)
+    res = resTable.contents.resTable
+    S=[res[0][k] for k in [0,1,2,3]]
+    H=[res[0][4],res[1][0],res[1][1],res[1][2]]
+    D=[res[1][3],res[1][4],res[2][0],res[2][1]]
+    C=[res[2][2],res[2][3],res[2][4],res[3][0]]
+    N=[res[3][k] for k in [1,2,3,4]]
+    return np.stack([N, S, H, D, C]).T  
+
 class Simulator():
     def __init__(self, constraint = None, given = None, rng = None, **kwargs):
         self.dealer = Dealer(constraint, given, **kwargs)
@@ -778,30 +794,48 @@ class Simulator():
 
     def expectation(self):
         return np.mean([deal.array_rep for deal in self.deals], axis=0)
+    
+    def solve_dds(self):
+        n_to_solve = min(self.n_deals, 5000) # deal limit depends on computer speed  
 
+        # results = []
+        # for x in tqdm(range(n_to_solve), desc = 'Solving double dummy'):
+        #     results.append(solve_one_board(self.deals[x]._get_pbn()))
+        with Pool(min(cpu_count(),8)) as p:
+            results = list(tqdm(p.imap(
+                solve_one_board,
+                [x._get_pbn() for x in self.deals[:n_to_solve]],
+                chunksize = 50,
+            ), desc = 'Solving double dummy', total = n_to_solve))
+        results = np.array(results)
+        self.dds = results
+        return results
 
-# Example usage
-a = parse_string('north 4441 13-18P south 3+S 4+H 14+HCP hascard HA')
-test = Constraint(SingleHandShapeConstraint(0, 5, 2, False), HCPConstraint([13,37,37,37],[10,0,0,0])) # 1NT
-test = Constraint()
-# test = Constraint(ShapeConstraint(
-#     shape_max = np.array([[5, 5, 5, 5],
-#                           [5, 5, 13, 13],
-#                           [5, 5, 13, 13],
-#                           [5, 13, 13, 13]]),
-#     shape_min = np.array([[0, 0, 0, 0],
-#                           [0, 0, 0, 0],
-#                           [0, 0, 0, 0],
-#                           [0, 0, 0, 0]]),
-#     permute_suits = False
-# ), HCPConstraint([37,37,37,37],[0,0,0,0]))
-# test = Constraint(ShapeConstraint(
-#     shape_max = np.ones((4,4)) * 5,
-#     shape_min = np.array([[0, 0, 0, 0],
-#                           [0, 0, 0, 0],
-#                           [0, 0, 0, 0],
-#                           [0, 0, 0, 0]]),
-#     permute_suits = False
-# ), HCPConstraint([37,37,37,37],[0,0,0,0]))
-dealer = Simulator(constraint = test).deal(5000)
-dealer.check(Constraint(None,HCPConstraint([37,37,37,37],[0,15,0,0])))
+# test usage
+if __name__ == '__main__':
+    a = parse_string('north 4441 13-18P south 3+S 4+H 14+HCP hascard HA')
+    test = Constraint(SingleHandShapeConstraint(0, 5, 2, False), HCPConstraint([13,37,37,37],[10,0,0,0])) # 1NT
+    test = Constraint(None, HCPConstraint(hcp_min = [16,0,0,0])) # 1C
+    # test = Constraint()
+    # test = Constraint(ShapeConstraint(
+    #     shape_max = np.array([[5, 5, 5, 5],
+    #                           [5, 5, 13, 13],
+    #                           [5, 5, 13, 13],
+    #                           [5, 13, 13, 13]]),
+    #     shape_min = np.array([[0, 0, 0, 0],
+    #                           [0, 0, 0, 0],
+    #                           [0, 0, 0, 0],
+    #                           [0, 0, 0, 0]]),
+    #     permute_suits = False
+    # ), HCPConstraint([37,37,37,37],[0,0,0,0]))
+    # test = Constraint(ShapeConstraint(
+    #     shape_max = np.ones((4,4)) * 5,
+    #     shape_min = np.array([[0, 0, 0, 0],
+    #                           [0, 0, 0, 0],
+    #                           [0, 0, 0, 0],
+    #                           [0, 0, 0, 0]]),
+    #     permute_suits = False
+    # ), HCPConstraint([37,37,37,37],[0,0,0,0]))
+    dealer = Simulator(constraint = test).deal(5000)
+    dealer.check(Constraint(None,HCPConstraint([37,37,37,37],[0,15,0,0])))
+    dealer.solve_dds()
