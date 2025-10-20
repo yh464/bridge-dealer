@@ -1,8 +1,10 @@
 import os
+import subprocess
 import numpy as np
 import pandas as pd
 import dds
 import ctypes
+from tqdm import tqdm
 
 def shuffle():
     rng = np.random.Generator(np.random.PCG64()) 
@@ -25,6 +27,34 @@ def shuffle():
         if suit < 3: dstr += (3-suit) * '.'
         if i < 3: dstr += ' '
     return dstr
+
+def dealscore(pbn, mode, epsilon, bias = 0.2):
+    '''bias = prefer single suit over two-suited hand for goulash dealer'''
+    rng = np.random.Generator(np.random.PCG64()) # again reset RNG with secrets.randbits
+    eps = rng.normal(loc = 0, scale = epsilon)
+    
+    hands = pbn[2:].split()
+    hcps = [4*x.count('A') + 3*x.count('K') + 2*x.count('Q') + x.count('J') for x in hands]
+    
+    if mode == 'random': return rng.random() + eps, hcps
+    if mode in ['game','slams']:
+        hcpd = hcps[0]+hcps[2]-hcps[1]-hcps[3]
+        if mode == 'slams': return abs(hcpd)+eps, hcps
+        else: return abs(hcpd - 11) + eps, hcps
+    if mode in ['goulash','balanced','long','misfit']:
+        shape = [[len(y) for y in x.split('.')] for x in hands]
+        if mode == 'long':
+            return sum([max(x) for x in shape]) + eps, hcps
+        else:
+            fit_ns = max([shape[0][x] + shape[2][x] for x in range(4)])
+            fit_ew = max([shape[1][x] + shape[3][x] for x in range(4)])
+            fit_ns = min(fit_ns, 9); fit_ew = min(fit_ew, 9)
+            # fit_ns = -1/(fit_ns - 6.5); fit_ew = -1/(fit_ew - 6.5)
+            fit_ns = 1/(9.1-fit_ns); fit_ew = 1/(9.1-fit_ew)
+            gparams = [(1+bias)*x[-1] + (1-bias)*x[-2] - x[0] for x in shape]
+            if mode == 'goulash': return sum(gparams) + eps, hcps
+            elif mode == 'misfit': return sum(gparams) - (fit_ns+fit_ew) + eps, hcps
+            else: return -sum(gparams) + eps, hcps
 
 class board():
     def __init__(self, idx, pbn = None, dlr = None, vul = None):
@@ -290,7 +320,8 @@ class session():
             print(latex_cmd, file = f)
             f.close()
         if os.path.isfile(pdflatex):
-            os.system(f'{pdflatex} --output-directory='+os.path.dirname(self.prefix)+f' {self.prefix}.tex')
+            _ = subprocess.check_output(f'{pdflatex} --output-directory='+
+                os.path.dirname(self.prefix)+f' {self.prefix}.tex', shell = True)
         return latex_cmd
     
     def to_pbn(self, force = False):
@@ -300,48 +331,24 @@ class session():
                 print(b.to_pbn(), file = f)
                 print(file = f)
     
-    def generate(self, mode = 'random', n = None, epsilon = 2, bias = 0.2, contract = False):
+    def generate(self, mode = 'random', n = None, epsilon = 2, bias = 0.2, contract = False, pdf = True):
         if mode not in ['goulash','misfit','balanced','long','slams','game','partscore']:
             mode = 'random'
             
         if n == None:
             n = self.n_boards if mode == 'random' else self.n_boards * 10
         
-        def dealscore(pbn, mode, epsilon, bias = 0.2):
-            '''bias = prefer single suit over two-suited hand for goulash dealer'''
-            rng = np.random.Generator(np.random.PCG64()) # again reset RNG with secrets.randbits
-            eps = rng.normal(loc = 0, scale = epsilon)
-            
-            if mode == 'random': return rng.random() + eps
-            hands = pbn[2:].split()
-            if mode in ['game','slams']:
-                hcps = [4*x.count('A') + 3*x.count('K') + 2*x.count('Q') + x.count('J') for x in hands]
-                hcpd = hcps[0]+hcps[2]-hcps[1]-hcps[3]
-                if mode == 'slams': return abs(hcpd)+eps
-                else: return abs(hcpd - 11) + eps
-            if mode in ['goulash','balanced','long','misfit']:
-                shape = [[len(y) for y in x.split('.')] for x in hands]
-                if mode == 'long':
-                    return sum([max(x) for x in shape]) + eps
-                else:
-                    fit_ns = max([shape[0][x] + shape[2][x] for x in range(4)])
-                    fit_ew = max([shape[1][x] + shape[3][x] for x in range(4)])
-                    fit_ns = min(fit_ns, 9); fit_ew = min(fit_ew, 9)
-                    # fit_ns = -1/(fit_ns - 6.5); fit_ew = -1/(fit_ew - 6.5)
-                    fit_ns = 1/(9.1-fit_ns); fit_ew = 1/(9.1-fit_ew)
-                    gparams = [(1+bias)*x[-1] + (1-bias)*x[-2] - x[0] for x in shape]
-                    if mode == 'goulash': return sum(gparams) + eps
-                    elif mode == 'misfit': return sum(gparams) - (fit_ns+fit_ew) + eps
-                    else: return -sum(gparams) + eps
-        
         all_deals = []
-        for _ in range(n):
+        for _ in tqdm(range(n), desc = 'Dealing hands'):
             pbn = shuffle()
+            score, hcps = dealscore(pbn, mode = mode, epsilon = epsilon, bias = bias)
             all_deals.append(pd.DataFrame(dict(
-                pbn = [pbn], score = dealscore(pbn, mode = mode, epsilon = epsilon, bias = bias)
+                pbn = [pbn], score = score, 
+                hcp_n = hcps[0], hcp_e = hcps[1], hcp_s = hcps[2], hcp_w = hcps[3]
                 )))
         all_deals = pd.concat(all_deals).sort_values(by = 'score', ascending = False).reset_index(drop = True)
-        for o, idx in zip(np.random.permutation(self.n_boards), range(self.n_boards)):
+        for o, idx in tqdm(zip(np.random.permutation(self.n_boards), range(self.n_boards)),
+            desc = 'Conducting double dummy analysis', total = self.n_boards):
             self.boards[idx] = board(idx+1, all_deals['pbn'].iloc[o])
         all_deals['used'] = False; all_deals.iloc[:self.n_boards,-1] = True
         
@@ -350,5 +357,5 @@ class session():
         self.to_pbn(force = True)
         self.latex = self.to_latex(contract = contract)
 
-# ses = session('test', n_boards = 24)
+# ses = session('test', n_boards = 24, n = 100000, force = True)
 # ses.generate(mode = 'goulash', n = 10000, epsilon = 0)

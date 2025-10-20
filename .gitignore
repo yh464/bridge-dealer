@@ -1,3 +1,8 @@
 /.spyproject
 /__pycache__
 /~BROMIUM
+test.*
+test.log
+test.pbn
+test.pdf
+test.tex
