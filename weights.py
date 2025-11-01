@@ -21,3 +21,6 @@ def heuristic_rank_weight(hcp_max, hcp_min):
         v_list.append(point_rank_weight(hcp))
         w_list.append(stats.norm.pdf(hcp, loc = 10, scale = 4.127))
     return np.average(v_list, axis=0, weights=w_list)
+
+def uniform_weight(hcp_max, hcp_min):
+    return np.ones(13)
