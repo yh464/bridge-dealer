@@ -955,7 +955,7 @@ if __name__ == '__main__':
     #     permute_suits = False
     # ), HCPConstraint([37,37,37,37],[0,0,0,0]))
     # dealer = Simulator(constraint = test).deal(5000)
-    dealer = Simulator(rng = np.random.default_rng(310101)).deal(int(1e8))
+    dealer = Simulator().deal(int(1e8))
     dealer.save('example')
     dealer.check(Constraint(None,HCPConstraint([37,37,37,37],[16,0,0,0])))
     # dealer.solve_dds()
