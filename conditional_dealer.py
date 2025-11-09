@@ -1,9 +1,8 @@
-import os, pickle, warnings
+import os, pickle, warnings, types, re
 from time import perf_counter
 from tqdm import tqdm
 import numpy as np
 import scipy.special as sp
-import types, re, dds, ctypes
 from multiprocessing import Pool, cpu_count
 
 def map_id_to_card(id:int): return (id // 13, id % 13) # returns (suit, rank)
@@ -13,6 +12,7 @@ def _dataframe_str(data, columns = ['S','H','D','C'], index = ['N','E','S','W'])
         '\n'.join([str(index[i]).ljust(2) + ''.join([str(data[i,j]).rjust(3) for j in range(data.shape[1])]) for i in range(data.shape[0])])
 
 def solve_one_board(pbn:str):
+    import dds, ctypes
     solver = dds.ddTableDealPBN()
     resTable = ctypes.pointer(dds.ddTableResults())
     dds.SetMaxThreads(0)
