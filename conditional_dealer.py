@@ -919,7 +919,7 @@ class Simulator():
         else:
             deals = np.load(f'{dirname}/deals.npy')
             deals = np.unpackbits(deals, count = deals.size*8 - (deals.size*8)%156).reshape((-1,3,4,13)).astype(bool)
-            self.deals = [Hand(given = np.concatenate([deal, ~deals.any(axis = 0)[np.newaxis,:,:]])) for deal in deals]
+            self.deals = [Hand(given = np.concatenate([deal, ~deals.any(axis = 0)[np.newaxis,:,:]], axis = 0)) for deal in deals]
         self.n_deals = len(self.deals)
         dds_path = f'{dirname}/dds.npy'
         if os.path.isfile(dds_path):
