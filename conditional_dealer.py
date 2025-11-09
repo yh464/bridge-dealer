@@ -965,6 +965,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     constraint_strings = ' '.join(args.constraint)
     constraint, given = parse_string(constraint_strings)
-    dealer = Simulator(constraint = constraint, given = given, rng = None).deal(args.n_deals, dirname = args.out)
+    dealer = Simulator(constraint = constraint, given = given, rng = None, dirname = args.out).deal(args.n_deals)
     dealer.save(args.out)
     # dealer.solve_dds()
