@@ -895,7 +895,7 @@ class Simulator():
         with open(f'{dirname}/dealer.pkl', 'wb') as f: pickle.dump(self.dealer, f)
 
         # optimise memory usage in saving deals
-        deals = np.stack([deal.array_rep for deal in self.deals], axis=0).astype(bool).reshape(-1)
+        deals = np.stack([deal.array_rep[:3,:,:] for deal in self.deals], axis=0).astype(bool).reshape(-1)
         deals = np.packbits(deals) # bool array use 8 bits per entry, pack to uint8
         np.save(f'{dirname}/deals.npy', deals)
 
@@ -918,8 +918,8 @@ class Simulator():
             self.deals = []
         else:
             deals = np.load(f'{dirname}/deals.npy')
-            deals = np.unpackbits(deals).reshape((-1,4,4,13)).astype(bool)
-            self.deals = [Hand(given = deal) for deal in deals]
+            deals = np.unpackbits(deals).reshape((-1,3,4,13)).astype(bool)
+            self.deals = [Hand(given = np.concatenate([deal, ~deals.any(axis = 0)[np.newaxis,:,:]])) for deal in deals]
         self.n_deals = len(self.deals)
         dds_path = f'{dirname}/dds.npy'
         if os.path.isfile(dds_path):
