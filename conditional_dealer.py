@@ -926,6 +926,7 @@ class Simulator():
             self.dds = np.load(dds_path)
             for idx, deal in enumerate(self.deals):
                 deal.dds = self.dds[idx]
+        else: self.dds = None
         print(f'Loaded {self.n_deals} simulated deals from directory: {dirname}')
         return self
 
