@@ -1,3 +1,4 @@
+import os, pickle, warnings
 from time import perf_counter
 from tqdm import tqdm
 import numpy as np
@@ -841,14 +842,16 @@ class Dealer():
         return deals  
 
 class Simulator():
-    def __init__(self, constraint = None, given = None, rng = None, **kwargs):
+    def __init__(self, constraint = None, given = None, rng = None, dirname = None, **kwargs):
+        if dirname != None: self.load(dirname, constraint = constraint, given = given, rng = rng, **kwargs); return
         self.dealer = Dealer(constraint, given, rng = rng, **kwargs)
         self.deals = []
         self.n_deals = 0
+        self.dds = None
 
     def deal(self, n:int = 50000):
-        self.deals = self.dealer.deal(n)
-        self.n_deals = n
+        self.deals += self.dealer.deal(n)
+        self.n_deals += n
         return self
 
     def check(self, constraint):
@@ -880,6 +883,51 @@ class Simulator():
         results = np.array(results) # board id, hand, contract (NT, S, H, D, C)
         self.dds = results
         return results
+    
+    def save(self, dirname: str = None):
+        if dirname is None: dirname = input('Please specify a directory name to save simulated deals: ')
+        os.makedirs(dirname, exist_ok = True)
+        
+        if os.path.isfile(f'{dirname}/deals.pkl'):
+            overwrite = input('deals.pkl already exists in the specified directory. Overwrite? (Y/n): ')
+            if overwrite.lower() == 'n':
+                print('Aborting.'); return
+        with open(f'{dirname}/dealer.pkl', 'wb') as f: pickle.dump(self.dealer, f)
+
+        # optimise memory usage in saving deals
+        deals = np.stack([deal.array_rep for deal in self.deals], axis=0).astype(bool).reshape(-1)
+        deals = np.packbits(deals) # bool array use 8 bits per entry, pack to uint8
+        np.save(f'{dirname}/deals.npy', deals)
+
+        # save dds results if available
+        if self.dds is not None:
+            np.save(f'{dirname}/dds.npy', self.dds)
+        print(f'Saved simulated deals to directory: {dirname}')
+
+    def load(self, dirname: str, **kwargs):
+        os.makedirs(dirname, exist_ok = True)
+        if os.path.isfile(f'{dirname}/dealer.pkl'):
+            warnings.warn('Loading dealer.pkl from the specified directory. Ignoring other parameters for the dealer.')
+            with open(f'{dirname}/dealer.pkl', 'rb') as f: self.dealer = pickle.load(f)
+        else:
+            warnings.warn('dealer.pkl not found in the specified directory. Specifying dealer with other parameters.')
+            self.dealer = Dealer(**kwargs)
+            
+        if not os.path.isfile(f'{dirname}/deals.npy'):
+            warnings.warn('deals.npy not found in the specified directory. No deals loaded.')
+            self.deals = []
+        else:
+            deals = np.load(f'{dirname}/deals.npy')
+            deals = np.unpackbits(deals).reshape((-1,4,4,13)).astype(bool)
+            self.deals = [Hand(given = deal) for deal in deals]
+        self.n_deals = len(self.deals)
+        dds_path = f'{dirname}/dds.npy'
+        if os.path.isfile(dds_path):
+            self.dds = np.load(dds_path)
+            for idx, deal in enumerate(self.deals):
+                deal.dds = self.dds[idx]
+        print(f'Loaded {self.n_deals} simulated deals from directory: {dirname}')
+        return self
 
 # test usage
 if __name__ == '__main__':
@@ -907,9 +955,7 @@ if __name__ == '__main__':
     #     permute_suits = False
     # ), HCPConstraint([37,37,37,37],[0,0,0,0]))
     # dealer = Simulator(constraint = test).deal(5000)
-    dealer = Simulator(
-        *parse_string('north 16+P'),
-        hcp_exact = True
-        ).deal(5000)
-    dealer.check(Constraint(None,HCPConstraint([37,37,37,37],[0,0,8,0])))
+    dealer = Simulator(rng = np.random.default_rng(310101)).deal(int(1e8))
+    dealer.save('example')
+    dealer.check(Constraint(None,HCPConstraint([37,37,37,37],[16,0,0,0])))
     # dealer.solve_dds()
