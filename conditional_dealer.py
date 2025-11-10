@@ -11,6 +11,41 @@ def _dataframe_str(data, columns = ['S','H','D','C'], index = ['N','E','S','W'])
     return '  '+''.join([str(c).rjust(3) for c in columns]) + '\n' + \
         '\n'.join([str(index[i]).ljust(2) + ''.join([str(data[i,j]).rjust(3) for j in range(data.shape[1])]) for i in range(data.shape[0])])
 
+def _array2pbn(array: np.ndarray):
+    '''input: (4,4,13) array representation of a deal
+    returns: PBN string representation of the deal'''
+    assert array.shape == (4,4,13), 'Array must be of shape (4,4,13).'
+    card_filter = np.array(['A','K','Q','J','T','9','8','7','6','5','4','3','2'])
+    pbn = []
+    for i in range(4):
+        tmp = []
+        for j in range(4): tmp.append(''.join(card_filter[array[i,j]]))
+        pbn.append('.'.join(tmp))
+    return '"N:'+' '.join(pbn)+'"'
+
+def _array2str(array: np.ndarray):
+    '''input: (4,4,13) array representation of a deal
+    returns: string representation of the deal'''
+    assert array.shape == (4,4,13), 'Array must be of shape (4,4,13).'
+    suit_filter = np.array(['S','H','D','C'])
+    card_filter = np.array(['A','K','Q','J','T','9','8','7','6','5','4','3','2'])
+    out = []
+    # north hand
+    for i in range(4):
+        out.append(' '*9+ suit_filter[i]+' '+(''.join(card_filter[array[0,i,:]])).ljust(23))
+    
+    # EW hands
+    for i in range(4):
+        out.append(
+            suit_filter[i] + ' ' + (''.join(card_filter[array[3,i,:]])).ljust(15) +
+            suit_filter[i] + ' ' + (''.join(card_filter[array[1,i,:]])).ljust(15)
+        )
+    
+    # south hand
+    for i in range(4):
+        out.append(' '*9+ suit_filter[i]+' '+(''.join(card_filter[array[2,i,:]])).ljust(23))
+    return '\n'.join(out)
+
 def solve_one_board(pbn:str):
     import dds, ctypes
     solver = dds.ddTableDealPBN()
@@ -34,6 +69,9 @@ def calc_par(dds_result: np.ndarray):
     
 
 class Hand():
+    '''
+    Basic instance to deal cards ensuring fixed cards are not changed
+    '''
     def __init__(
             self, 
             given = None,
@@ -52,7 +90,6 @@ class Hand():
             self.fixed = np.zeros((4,13)).astype('?') # axes 0,1 = suit, card
         self.shape = self._get_shape() # axes 0,1 = player, suit
         self.hcp = self._get_hcp() # axes 0 = player
-        self.pbn = ''
         self.dds = None
 
     def __str__(self): return self._get_str()
@@ -61,44 +98,18 @@ class Hand():
         return self.array_rep.sum() == 52
 
     def _get_shape(self):
-        self.shape = self.array_rep.sum(axis=2)
-        return self.array_rep.sum(axis=2)
+        self.shape = self.array_rep.sum(axis=2, dtype = np.int8)
+        return self.shape
     
     def _get_hcp(self):
-        hcp_filter = np.zeros((4,13)).astype(int)
-        hcp_filter[:,:4] = np.repeat([[4,3,2,1]], 4, axis = 0)
-        self.hcp = (self.array_rep * hcp_filter).sum(axis=(1,2))
+        hcp_filter = np.zeros(13).astype(int)
+        hcp_filter[:4] = [4,3,2,1]
+        self.hcp = np.dot(self.array_rep, hcp_filter).sum(axis=1, dtype = np.int8)
         return self.hcp
 
-    def _get_pbn(self):
-        card_filter = np.array(['A','K','Q','J','T','9','8','7','6','5','4','3','2'])
-        pbn = []
-        for i in range(4):
-            tmp = []
-            for j in range(4): tmp.append(''.join(card_filter[self.array_rep[i,j]]))
-            pbn.append('.'.join(tmp))
-        self.pbn = '"N:'+' '.join(pbn)+'"'
-        return self.pbn
+    def _get_pbn(self): return _array2pbn(self.array_rep)
     
-    def _get_str(self):
-        suit_filter = np.array(['S','H','D','C'])
-        card_filter = np.array(['A','K','Q','J','T','9','8','7','6','5','4','3','2'])
-        out = []
-        # north hand
-        for i in range(4):
-            out.append(' '*9+ suit_filter[i]+' '+(''.join(card_filter[self.array_rep[0,i,:]])).ljust(23))
-        
-        # EW hands
-        for i in range(4):
-            out.append(
-                suit_filter[i] + ' ' + (''.join(card_filter[self.array_rep[3,i,:]])).ljust(15) +
-                suit_filter[i] + ' ' + (''.join(card_filter[self.array_rep[1,i,:]])).ljust(15)
-            )
-        
-        # south hand
-        for i in range(4):
-            out.append(' '*9+ suit_filter[i]+' '+(''.join(card_filter[self.array_rep[2,i,:]])).ljust(23))
-        return '\n'.join(out)
+    def _get_str(self): return _array2str(self.array_rep)
     
     def _dealcard(self, hand:int, suit:int, rank:int):
         if self.fixed[suit, rank]: raise ValueError('Cannot deal a fixed card.')
@@ -113,6 +124,72 @@ class Hand():
     def copy(self): return Hand(given = self.array_rep.copy())
 
     def solve_dds(self): self.dds = solve_one_board(self._get_pbn())
+
+class MultiHand():
+    '''
+    Optimised for checking and unsuitable for dealing cards
+    '''
+    def __init__(self, *hands, array_rep = None):
+        if len(hands) > 0:
+            self.array_rep = np.concatenate([hand.array_rep.reshape((-1,4,4,13)) for hand in hands], axis=0)
+            self.n_hands = len(hands)
+        elif array_rep is not None:
+            assert array_rep.ndim == 4 & array_rep.shape[1] == 4 and array_rep.shape[2] == 4 and array_rep.shape[3] == 13, 'Array representation must be a (n_hands,4,4,13) numpy array.'
+            self.array_rep = array_rep.astype('?')
+            self.n_hands = array_rep.shape[0]
+        else:
+            self.array_rep = np.zeros((0,4,4,13)).astype('?')
+            self.n_hands = 0
+        self.hcp = self._get_hcp() # axes 0,1 = hand_id, player
+        self.shape = self._get_shape() # axes 0,1,2 = hand_id, player, suit
+        self.dds = None
+
+    def __len__(self): return self.array_rep.shape[0]
+
+    def __getitem__(self, idx): return Hand(given = self.array_rep[idx])
+
+    def __str__(self):
+        if self.n_hands > 10: warnings.warn('Only printing the first 10 hands.')
+        out = ('\n'+'-'*30+'\n').join(
+            [f'Hand {i}:\n'+_array2str(self.array_rep[i]) for i in range(min(self.n_hands,10))]
+        )
+        return out
+
+    def _get_hcp(self):
+        hcp_filter = np.zeros(13).astype(int)
+        hcp_filter[:4] = [4,3,2,1]
+        self.hcp = np.dot(self.array_rep.sum(axis=2, dtype = np.int8), hcp_filter) # axes 0, 1 = hand_id, player
+        return self.hcp
+    
+    def _get_shape(self):
+        self.shape = self.array_rep.sum(axis=3, dtype = np.int8) # axes 0, 1, 2 = hand_id, player, suit
+        return self.shape
+    
+    def _get_pbn(self, n = 5000):
+        n = min(n, self.array_rep.shape[0])
+        return [_array2pbn(self.array_rep[i]) for i in range(n)]
+    
+    def head(self, n):
+        n = min(n, self.array_rep.shape[0])
+        return MultiHand(array_rep = self.array_rep[:n])
+    
+    def tail(self, n):
+        n = min(n, self.array_rep.shape[0])
+        return MultiHand(array_rep = self.array_rep[-n:])
+
+    def solve_dds(self, n = 5000):
+        n = min(n, self.array_rep.shape[0])
+        if n > 10000: warnings.warn('Solving more than 10000 deals, consider time constraint')
+        with Pool(min(cpu_count(),8)) as p:
+            results = list(tqdm(p.imap(
+                solve_one_board,
+                self._get_pbn(n),
+                chunksize = 50,
+            ), desc = 'Solving double dummy', total = n))
+        self.dds = np.stack(results, axis=0)
+        return self.dds
+
+    def copy(self): return MultiHand(array_rep = self.array_rep.copy())
 
 class SuitPermuter():
     def __init__(self, overall = False, **kwargs):
@@ -150,18 +227,19 @@ class SuitPermuter():
         hand.shape = hand.shape[:, perm]
         return hand
     
-    def all_shapes(self, hand:Hand):
-        _ = hand._get_shape()
-        if not any(self.permutable): return [hand.shape]
+    def all_shapes(self, hand:Hand | np.ndarray):
+        if isinstance(hand, Hand): shape = hand.shape
+        else: shape = hand
+        if not any(self.permutable): return [shape]
         from itertools import permutations
         perm = np.arange(4)
         permutable_suits = [i for i in perm if i in self.permutable]
         all_perms = set(permutations(permutable_suits))
         all_shapes = []
         for perm in all_perms:
-            shape = hand.shape.copy()
-            shape[:, permutable_suits] = shape[:, list(perm)]
-            all_shapes.append(shape)
+            tmp = shape.copy()
+            tmp[:, permutable_suits] = tmp[:, list(perm)]
+            all_shapes.append(tmp)
         return all_shapes
 
 class HCPConstraint():
@@ -194,10 +272,10 @@ class HCPConstraint():
     def copy(self):
         return HCPConstraint(self.hcp_max.copy(), self.hcp_min.copy())
 
-    def check(self, hand: Hand):
+    def check(self, hand: Hand | MultiHand):
         if self.no_hcp_cond: return True
-        _ = hand._get_hcp() # forcibly updates the HCP attribute of the hand
-        return all(hand.hcp <= self.hcp_max) and all(hand.hcp >= self.hcp_min)
+        if isinstance(hand, Hand): _ = hand._get_hcp() # forcibly updates the HCP attribute of a Hand instance as it is mutable
+        return ((hand.hcp <= self.hcp_max).all(axis = -1) & (hand.hcp >= self.hcp_min).all(axis = -1))
 
 class SingleHandShapeConstraint():
     def __init__(
@@ -234,14 +312,15 @@ class SingleHandShapeConstraint():
     def copy(self):
         return SingleHandShapeConstraint(self.hand, self.suit_max.copy(), self.suit_min.copy(), self.permute_suits)
     
-    def check(self, hand: Hand):
+    def check(self, hand: Hand | MultiHand):
         if self.no_shape_cond: return True
-        _ = hand._get_shape() # forcibly updates the shape attribute of the hand
-        for shape in self.permute_suits.all_shapes(hand):
-            shape = shape[self.hand,:]
-            if (shape <= self.suit_max).all() and (shape >= self.suit_min).all():
-                return True
-        return False
+        if isinstance(hand, Hand): _ = hand._get_shape() # forcibly updates the shape attribute of the hand
+        out = []
+        constrained_hand = hand.shape[:,self.hand,:] if isinstance(hand, MultiHand) else hand.shape[self.hand,:]
+        for min_shape, max_shape in zip(self.permute_suits.all_shapes(self.suit_min), self.permute_suits.all_shapes(self.suit_max)):
+            out.append((constrained_hand <= max_shape).all(axis = -1) & (constrained_hand >= min_shape).all(axis = -1))
+        out = np.stack(out).any(axis = 0)
+        return out
 
 class ShapeConstraint():
     def __new__(
@@ -303,11 +382,12 @@ class ShapeConstraint():
 
     def check(self, hand: Hand):
         if self.no_shape_cond: return True
-        _ = hand._get_shape() # forcibly updates the shape attribute of the hand
-        for shape in self.permute_suits.all_shapes(hand):
-            if (shape <= self.shape_max).all() and (shape >= self.shape_min).all():
-                return True
-        return False
+        if isinstance(hand, Hand): _ = hand._get_shape() # forcibly updates the shape attribute of the hand
+        out = []
+        for min_shape, max_shape in zip(self.permute_suits.all_shapes(self.shape_min), self.permute_suits.all_shapes(self.shape_max)):
+            out.append((hand.shape <= max_shape).all(axis = (-2,-1)) & (hand.shape >= min_shape).all(axis = (-2,-1)))
+        out = np.stack(out).any(axis = 0)
+        return out
 
 class Constraint():
     def __init__(
@@ -334,10 +414,14 @@ class Constraint():
             self.hcp_constraint.copy() if self.hcp_constraint is not None else None
         )
 
-    def check(self, hand: Hand):
-        if not self.no_shape_cond and not self.shape_constraint.check(hand): return False
-        if not self.no_hcp_cond and not self.hcp_constraint.check(hand): return False
-        return True
+    def check(self, hand: Hand | MultiHand):
+        if self.no_shape_cond: shape_pass = True
+        else: shape_pass = self.shape_constraint.check(hand)
+        if self.no_hcp_cond: hcp_pass = True
+        else: hcp_pass = self.hcp_constraint.check(hand)
+        out = shape_pass & hcp_pass
+        if isinstance(out, bool) and isinstance(hand, MultiHand): out = np.repeat(out, hand.n_hands)
+        return out
 
 class DDSConstraint():
     def __init__(
@@ -546,11 +630,11 @@ class Dealer():
         if hand is None: hand = self.partial_deal.copy()
         available_cards = np.stack(np.where(hand._to_deal())).T # (suit, rank)
         self.rng.shuffle(available_cards)
-        remaining_cards = np.ones(4)*13 - hand.array_rep.sum(axis=(1,2))
+        remaining_cards = np.ones(4)*13 - hand.array_rep.sum(axis=(1,2), dtype = np.int8)
         for idx, card in enumerate(available_cards):
             if idx < remaining_cards[0]: hand.array_rep[0, card[0], card[1]] = True
             elif idx < remaining_cards[0] + remaining_cards[1]: hand.array_rep[1, card[0], card[1]] = True
-            elif idx < remaining_cards[0:3].sum(): hand.array_rep[2, card[0], card[1]] = True
+            elif idx < remaining_cards[0:3].sum(dtype = np.int8): hand.array_rep[2, card[0], card[1]] = True
             else: hand.array_rep[3, card[0], card[1]] = True
         return hand
 
@@ -573,7 +657,7 @@ class Dealer():
                 raise ValueError('Given hand conflicts with shape constraints.')
             chosen_cards = self.rng.choice(
                 available_cards,
-                size=constraint.suit_min[suit] - hand.array_rep[constraint.hand, suit,:].sum(), 
+                size=constraint.suit_min[suit] - hand.array_rep[constraint.hand, suit,:].sum(dtype = np.int8), 
                 replace=False)
             hand.array_rep[constraint.hand, suit, chosen_cards] = True
 
@@ -586,14 +670,14 @@ class Dealer():
                 avail_to_restricted_hand.append(np.stack((np.ones(len(available_cards))*suit,
                                                           available_cards)).T)
             self.rng.shuffle(available_cards)
-            n_avail_to_restricted_hand = constraint.suit_max[suit] - hand.array_rep[constraint.hand, suit,:].sum()
+            n_avail_to_restricted_hand = constraint.suit_max[suit] - hand.array_rep[constraint.hand, suit,:].sum(dtype = np.int8)
             avail_to_restricted_hand.append(np.stack((np.ones(n_avail_to_restricted_hand)*suit, 
                                                       available_cards[:n_avail_to_restricted_hand])).T)
         
         # fill the constrained hand to 13 cards, using above available cards
         avail_to_restricted_hand = np.concatenate(avail_to_restricted_hand, axis=0).astype(int)
         self.rng.shuffle(avail_to_restricted_hand)
-        n_to_restricted_hand = int(13 - hand.array_rep[constraint.hand,:,:].sum())
+        n_to_restricted_hand = 13 - hand.array_rep[constraint.hand,:,:].sum(dtype = np.int8)
         for card in avail_to_restricted_hand[:n_to_restricted_hand]:
             hand.array_rep[constraint.hand, card[0], card[1]] = True
 
@@ -626,7 +710,7 @@ class Dealer():
         for card in available_cards:
             weights_array = hand._to_deal()[np.newaxis,:,:].astype(int).repeat(4, axis=0)
             weights_array[hand._get_shape() == constraint.shape_max] = 0
-            remaining_cards = hand._to_deal().sum(axis = 1) # empty slots in each hand
+            remaining_cards = hand._to_deal().sum(axis = 1, dtype = np.int8) # empty slots in each hand
             weights_array = weights_array / weights_array.sum(axis=(1,2), keepdims=True)
             weights_array *= remaining_cards[:,np.newaxis,np.newaxis]
             hand.array_rep[self.rng.choice(4, p = weights_array[:,*card] / weights_array[:,*card].sum()), 
@@ -664,8 +748,8 @@ class Dealer():
         #     where s[x] = cards left in suit x, h[x] = cards left in hand x, i[x,y] = cards to deal to hand x in suit y
         #     ignoring irrelevant terms
 
-        cards_by_suit = 13 - current_shape.sum(axis=0) # cards left to deal in each suit
-        cards_by_hand = 13 - current_shape.sum(axis=1) # cards left to deal in each hand
+        cards_by_suit = 13 - current_shape.sum(axis=0, dtype = np.int8) # cards left to deal in each suit
+        cards_by_hand = 13 - current_shape.sum(axis=1, dtype = np.int8) # cards left to deal in each hand
         constrain_4th_suit = np.ones(4)*13; constrain_4th_hand = np.ones(4)*13 # if 3 hands/suits are constrained, the 4th is fixed
         constrained_idx = np.stack(np.where((current_shape <= constraint.shape_max) & (constraint.shape_max != 13))).T # (hand, suit)
         for s in np.unique(constrained_idx[:,1]):
@@ -762,7 +846,7 @@ class Dealer():
                     raise ValueError('Given hand conflicts with shape constraints.')
                 chosen_cards = self.rng.choice(
                     available_cards,
-                    size=constraint.shape_min[idx,suit] - hand.array_rep[idx, suit,:].sum(), 
+                    size=constraint.shape_min[idx,suit] - hand.array_rep[idx, suit,:].sum(dtype = np.int8), 
                     replace=False)
                 hand.array_rep[idx, suit, chosen_cards] = True
         
@@ -810,7 +894,7 @@ class Dealer():
                 if weights[idx] is None: continue
                 for suit in range(4):
                     if cards_to_deal[idx, suit] == 0: continue
-                    suit_available = np.where(hand.array_rep[:,suit,:].sum(axis=0) == 0)[0]
+                    suit_available = np.where(hand.array_rep[:,suit,:].sum(axis=0, dtype = np.int8) == 0)[0]
                     weight_available = weights[idx][suit_available]
                     hand.array_rep[idx, suit, self.rng.choice(
                         suit_available, 
@@ -850,39 +934,28 @@ class Simulator():
         self.dds = None
 
     def deal(self, n:int = 50000):
-        self.deals += self.dealer.deal(n)
-        self.n_deals += n
+        self.deals = MultiHand(self.deals, *self.dealer.deal(n))
+        self.n_deals = len(self.deals)
         return self
 
     def check(self, constraint):
-        passed = [constraint.check(deal) for deal in self.deals]
+        passed = constraint.check(self.deals)
         print(f'{sum(passed)}/{self.n_deals}({sum(passed)/self.n_deals:.2f}) deals passed the constraint check.')
         return sum(passed)/self.n_deals
 
     def subset(self, constraint):
         new_simulator = Simulator()
         new_simulator.dealer = self.dealer
-        new_simulator.deals = [deal for deal in self.deals if constraint.check(deal)]
+        new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[constraint.check(self.deals)])
         new_simulator.n_deals = len(new_simulator.deals)
         return new_simulator
 
     def expectation(self):
-        return np.mean([deal.array_rep for deal in self.deals], axis=0)
+        return np.mean(self.deals.array_rep, axis=0)
     
-    def solve_dds(self):
-        n_to_solve = min(self.n_deals, 5000) # deal limit depends on computer speed  
-        # 5000 boards ~ 3 minutes
-        with Pool(min(cpu_count(),8)) as p:
-            results = list(tqdm(p.imap(
-                solve_one_board,
-                [x._get_pbn() for x in self.deals[:n_to_solve]],
-                chunksize = 50,
-            ), desc = 'Solving double dummy', total = n_to_solve))
-        for idx, res in enumerate(results):
-            self.deals[idx].dds = res
-        results = np.array(results) # board id, hand, contract (NT, S, H, D, C)
-        self.dds = results
-        return results
+    def solve_dds(self, n = 5000):
+        self.dds = self.deals.solve_dds(n = n)
+        return self.dds
     
     def save(self, dirname: str = None):
         if dirname is None: dirname = input('Please specify a directory name to save simulated deals: ')
@@ -895,7 +968,7 @@ class Simulator():
         with open(f'{dirname}/dealer.pkl', 'wb') as f: pickle.dump(self.dealer, f)
 
         # optimise memory usage in saving deals
-        deals = np.stack([deal.array_rep[:3,:,:] for deal in self.deals], axis=0).astype(bool).reshape(-1) # 4th hand is implied
+        deals = self.deals.array_rep[:,:3,:,:].reshape(-1) # 4th hand is implied
         deals = np.packbits(deals) # bool array use 8 bits per entry, pack to uint8
         np.save(f'{dirname}/deals.npy', deals)
 
@@ -919,7 +992,8 @@ class Simulator():
         else:
             deals = np.load(f'{dirname}/deals.npy')
             deals = np.unpackbits(deals, count = deals.size*8 - (deals.size*8)%156).reshape((-1,3,4,13)).astype(bool)
-            self.deals = [Hand(given = np.concatenate([deal, ~deal.any(axis = 0)[np.newaxis,:,:]], axis = 0)) for deal in deals]
+            deals = np.concatenate([deals, ~deals.any(axis = 1)[:,np.newaxis,:,:]], axis = 1) # reconstruct 4th hand
+            self.deals = MultiHand(array_rep = deals)
         self.n_deals = len(self.deals)
         dds_path = f'{dirname}/dds.npy'
         if os.path.isfile(dds_path):
