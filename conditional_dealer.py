@@ -121,9 +121,16 @@ class Hand():
 
     def reset(self): self.array_rep[:, ~self.fixed] = False
 
+    def fix(self): self.fixed = self.array_rep.any(axis=0)
+
     def copy(self): return Hand(given = self.array_rep.copy())
 
     def solve_dds(self): self.dds = solve_one_board(self._get_pbn())
+
+    def check(self, other_hand):
+        tmp = self.array_rep.copy()
+        tmp[:,~self.fixed] = False
+        return other_hand.array_rep[..., tmp].all(axis = -1)
 
 class MultiHand():
     '''
@@ -414,6 +421,7 @@ class Constraint():
         self,
         shape_constraint : ShapeConstraint | SingleHandShapeConstraint | types.NoneType = None,
         hcp_constraint : HCPConstraint | types.NoneType = None,
+        given : Hand | np.ndarray | types.NoneType = None,
         **kwargs
     ):
         if shape_constraint is not None: self.shape_constraint = shape_constraint
@@ -422,6 +430,8 @@ class Constraint():
         if hcp_constraint is not None: self.hcp_constraint = hcp_constraint
         elif len(kwargs) > 0: self.hcp_constraint = HCPConstraint(**kwargs)
         else: self.hcp_constraint = None
+        if given is not None: self.given = Hand(given)
+        else: self.given = None
         self.no_shape_cond = self.shape_constraint is None or self.shape_constraint.no_shape_cond
         self.no_hcp_cond = self.hcp_constraint is None or self.hcp_constraint.no_hcp_cond
         self.permute_suits = self.shape_constraint.permute_suits if self.shape_constraint is not None else SuitPermuter()
@@ -439,13 +449,15 @@ class Constraint():
                 super().__setattr__(name, value)
             elif value.permutable != []:
                 warnings.warn('Cannot set permute_suits when there is no shape constraint.')
-        elif name in ['shape_constraint', 'hcp_constraint']:
+        elif name in ['shape_constraint', 'hcp_constraint', 'given']:
             super().__setattr__(name, value)
             if name == 'shape_constraint':
                 super().__setattr__('permute_suits', value.permute_suits if value is not None else SuitPermuter())
                 super().__setattr__('no_shape_cond', value is None or value.no_shape_cond)
             elif name == 'hcp_constraint':
                 super().__setattr__('no_hcp_cond', value is None or value.no_hcp_cond)
+        else:
+            super().__setattr__(name, value)
 
     def copy(self):
         return Constraint(
@@ -458,7 +470,9 @@ class Constraint():
         else: shape_pass = self.shape_constraint.check(hand)
         if self.no_hcp_cond: hcp_pass = True
         else: hcp_pass = self.hcp_constraint.check(hand)
-        out = shape_pass & hcp_pass
+        if self.given is not None: given_pass = self.given.check(hand)
+        else: given_pass = True
+        out = shape_pass & hcp_pass & given_pass
         if isinstance(out, bool) and isinstance(hand, MultiHand): out = np.repeat(out, hand.n_hands)
         return out
 
@@ -609,6 +623,7 @@ def parse_string(constraint_string: str):
                 suit = suit_map[match.group(2)]; rank = rank_map[match.group(1)]
             else: raise ValueError(f'Unrecognized card token: {token}.')
             given_hand._dealcard(hand, suit, rank)
+        given_hand.fix()
         return given_hand
 
     # initialise constraints
@@ -654,13 +669,12 @@ def parse_string(constraint_string: str):
         # parse given cards
         if len(given_tokens) > 0: given_hand = parse_given_cards(idx, given_hand, *given_tokens)
     shape_constraint = combine_single_hand_shape_constraints(*shape_constraints) if len(shape_constraints) > 0 else None
-    return Constraint(shape_constraint, hcp_constraint), given_hand
+    return Constraint(shape_constraint, hcp_constraint, given_hand)
 
 class Dealer():
     def __init__(
             self, 
             constraint: Constraint | ShapeConstraint | SingleHandShapeConstraint | HCPConstraint | types.NoneType = None,
-            given: np.ndarray | Hand | types.NoneType = None,
             rng: np.random.Generator | int | bool | types.NoneType = False,
             hcp_exact: bool = False,
             **kwargs
@@ -672,7 +686,7 @@ class Dealer():
             self.constraint = Constraint(hcp_constraint = constraint, **kwargs)
         else: self.constraint = Constraint(**kwargs)
 
-        if given is not None: self.partial_deal = Hand(given = given)
+        if constraint.given is not None: self.partial_deal = Hand(given = constraint.given)
         else: self.partial_deal = Hand()
 
         self.hcp_exact = hcp_exact
@@ -983,9 +997,9 @@ class Dealer():
         return deals  
 
 class Simulator():
-    def __init__(self, constraint = None, given = None, rng = None, dirname = None, **kwargs):
-        if dirname != None: self.load(dirname, constraint = constraint, given = given, rng = rng, **kwargs); return
-        self.dealer = Dealer(constraint, given, rng = rng, **kwargs)
+    def __init__(self, constraint = None, rng = None, dirname = None, **kwargs):
+        if dirname != None: self.load(dirname, constraint = constraint, rng = rng, **kwargs); return
+        self.dealer = Dealer(constraint, rng = rng, **kwargs)
         self.deals = MultiHand()
         self.n_deals = 0
         self.dds = None
@@ -1135,7 +1149,7 @@ if __name__ == '__main__':
     parser.add_argument('-o','--out', type =str, default = 'simulated_deals', help='Output directory to save simulated deals.')
     args = parser.parse_args()
     constraint_strings = ' '.join(args.constraint)
-    constraint, given = parse_string(constraint_strings)
-    dealer = Simulator(constraint = constraint, given = given, rng = None, dirname = args.out).deal(args.n_deals)
+    constraint = parse_string(constraint_strings)
+    dealer = Simulator(constraint = constraint, rng = None, dirname = args.out).deal(args.n_deals)
     dealer.save(args.out)
     # dealer.solve_dds()
