@@ -66,7 +66,7 @@ def calc_par(dds_result: np.ndarray):
     '''input: (4,5) array of double dummy results
     returns: (4,4) array of par scores, axis 0 = dealer, axis 1 = (Non, NS, EW, Both)'''
     assert dds_result.shape == (4,5), 'DDS result must be a (4,5) array.'
-    
+    # TODO    
 
 class Hand():
     '''
@@ -102,9 +102,9 @@ class Hand():
         return self.shape
     
     def _get_hcp(self):
-        hcp_filter = np.zeros(13).astype(int)
+        hcp_filter = np.zeros(13).astype(np.int8)
         hcp_filter[:4] = [4,3,2,1]
-        self.hcp = np.dot(self.array_rep, hcp_filter).sum(axis=1, dtype = np.int8)
+        self.hcp = np.dot(self.array_rep.sum(axis=1, dtype=np.int8), hcp_filter)
         return self.hcp
 
     def _get_pbn(self): return _array2pbn(self.array_rep)
@@ -148,6 +148,10 @@ class MultiHand():
 
     def __getitem__(self, idx): return Hand(given = self.array_rep[idx])
 
+    def __iter__(self):
+        for i in range(self.n_hands):
+            yield Hand(given = self.array_rep[i])
+
     def __str__(self):
         if self.n_hands > 10: warnings.warn('Only printing the first 10 hands.')
         out = ('\n'+'-'*30+'\n').join(
@@ -156,7 +160,7 @@ class MultiHand():
         return out
 
     def _get_hcp(self):
-        hcp_filter = np.zeros(13).astype(int)
+        hcp_filter = np.zeros(13).astype(np.int8)
         hcp_filter[:4] = [4,3,2,1]
         self.hcp = np.dot(self.array_rep.sum(axis=2, dtype = np.int8), hcp_filter) # axes 0, 1 = hand_id, player
         return self.hcp
@@ -192,7 +196,7 @@ class MultiHand():
     def copy(self): return MultiHand(array_rep = self.array_rep.copy())
 
 class SuitPermuter():
-    def __init__(self, overall = False, **kwargs):
+    def __init__(self, overall = False, permute_two_pairs = False, **kwargs):
         if isinstance(overall, bool):
             self.s = overall; self.h = overall; self.d = overall; self.c = overall
         elif len(overall) == 4:
@@ -209,6 +213,9 @@ class SuitPermuter():
         if self.d: permutable.append(2)
         if self.c: permutable.append(3)
         self.permutable = permutable
+        self.permute_two_pairs = (permute_two_pairs and len(permutable) == 2)
+        if permute_two_pairs and not self.permute_two_pairs:
+            warnings.warn('permute_two_pairs option is only available if exactly two suits are permutable.')
     
     def __str__(self):
         if any(self.permutable):
@@ -223,6 +230,8 @@ class SuitPermuter():
     def permute(self, hand: Hand):
         perm = np.arange(4)
         np.random.shuffle(perm[self.permutable])
+        if self.permute_two_pairs:
+            np.random.shuffle(perm[[i for i in range(4) if i not in self.permutable]])
         hand.array_rep = hand.array_rep[:, perm, :]
         hand.shape = hand.shape[:, perm]
         return hand
@@ -234,11 +243,21 @@ class SuitPermuter():
         from itertools import permutations
         perm = np.arange(4)
         permutable_suits = [i for i in perm if i in self.permutable]
-        all_perms = set(permutations(permutable_suits))
+        if self.permute_two_pairs:
+            other_suits = [i for i in perm if i not in self.permutable]
+            perms1 = list(permutations(permutable_suits))
+            perms2 = list(permutations(other_suits))
+            all_perms = []
+            for p1 in perms1:
+                for p2 in perms2:
+                    all_perms.append(p1 + p2)
+            permutable_suits = permutable_suits + other_suits
+        else: all_perms = set(permutations(permutable_suits))
         all_shapes = []
         for perm in all_perms:
             tmp = shape.copy()
-            tmp[:, permutable_suits] = tmp[:, list(perm)]
+            if tmp.ndim == 2: tmp[:, permutable_suits] = tmp[:, list(perm)]
+            else: tmp[permutable_suits] = tmp[list(perm)]
             all_shapes.append(tmp)
         return all_shapes
 
@@ -317,7 +336,8 @@ class SingleHandShapeConstraint():
         if isinstance(hand, Hand): _ = hand._get_shape() # forcibly updates the shape attribute of the hand
         out = []
         constrained_hand = hand.shape[:,self.hand,:] if isinstance(hand, MultiHand) else hand.shape[self.hand,:]
-        for min_shape, max_shape in zip(self.permute_suits.all_shapes(self.suit_min), self.permute_suits.all_shapes(self.suit_max)):
+        for min_shape, max_shape in zip(self.permute_suits.all_shapes(self.suit_min), 
+                                        self.permute_suits.all_shapes(self.suit_max)):
             out.append((constrained_hand <= max_shape).all(axis = -1) & (constrained_hand >= min_shape).all(axis = -1))
         out = np.stack(out).any(axis = 0)
         return out
@@ -408,6 +428,25 @@ class Constraint():
 
     def __str__(self): return self.shape_constraint.__str__() + '\n\n' + self.hcp_constraint.__str__()
 
+    def __setattr__(self, name, value):
+        if name == 'no_shape_cond' and (self.shape_constraint is None or self.shape_constraint.no_shape_cond) != value:
+            raise AttributeError(f'Cannot directly set attribute {name}; modify the underlying constraint instead.')
+        elif name == 'no_hcp_cond' and (self.hcp_constraint is None or self.hcp_constraint.no_hcp_cond) != value:
+            raise AttributeError(f'Cannot directly set attribute {name}; modify the underlying constraint instead.')
+        elif name == 'permute_suits':
+            if self.shape_constraint is not None:
+                self.shape_constraint.permute_suits = value
+                super().__setattr__(name, value)
+            elif value.permutable != []:
+                warnings.warn('Cannot set permute_suits when there is no shape constraint.')
+        elif name in ['shape_constraint', 'hcp_constraint']:
+            super().__setattr__(name, value)
+            if name == 'shape_constraint':
+                super().__setattr__('permute_suits', value.permute_suits if value is not None else SuitPermuter())
+                super().__setattr__('no_shape_cond', value is None or value.no_shape_cond)
+            elif name == 'hcp_constraint':
+                super().__setattr__('no_hcp_cond', value is None or value.no_hcp_cond)
+
     def copy(self):
         return Constraint(
             self.shape_constraint.copy() if self.shape_constraint is not None else None,
@@ -451,7 +490,7 @@ def parse_string(constraint_string: str):
         north (conditions) east (conditions) south (conditions) west (conditions)
         no spaces are allowed within each condition
         following conditions are accepted:
-            5+S / 3-C / 3-5H : shape constraint for each suit
+            5+S / 3-C / 3-5H / 5+H/S : shape constraint for each suit
             5332 / 5(3)3(2) / 5(332) : shape constraint for all suits, must add to 13; suits in brackets can be permuted
                 this constraint cannot be used for suits with 10+ cards
             longest>=6 / second==4 / third<3 / shortest==0 : shape constraint for longest/second/third/shortest suits
@@ -470,28 +509,40 @@ def parse_string(constraint_string: str):
         elif current_hand == '': raise ValueError('Constraint string must start with a hand name (north/east/south/west).')
         else: hand_conditions[current_hand].append(token)
     
-    def classify_consition(token:str):
-        if re.match(r'^\d{1,2}[\+\-]\d{0,2}[shdc]$', token): return 'shape_suit'
+    def classify_condition(token:str):
+        if re.match(r'^\d{1,2}[\+\-]?\d{0,2}[\/shdc]+$', token): return 'shape_suit'
         elif re.match(r'^[0-9()]*$', token): return 'shape_all'
         elif re.match(r'^(longest|second|third|shortest)([<>=])(={0,1})(\d{1,2})$', token): return 'shape_ranked'
-        elif re.match(r'^\d{1,2}[\+\-]\d{0,2}(hcp|p)$', token): return 'hcp'
+        elif re.match(r'^\d{1,2}[\+\-]?\d{0,2}(hcp|p)$', token): return 'hcp'
         else: raise ValueError(f'Unrecognized constraint token: {token}; given cards must follow the "hascard" keyword.')
 
     def parse_shape_suit(*tokens:str):
         suit_map = {'s':0, 'h':1, 'd':2, 'c':3}
+        constrained_suits = []; permutable_suits = []
         shape_max = np.ones(4)*13; shape_min = np.zeros(4)
         for token in tokens:
-            match = re.match(r'^(\d{1,2})([\+\-])(\d{0,2})([shdc])$', token)
+            match = re.match(r'^(\d{1,2})([\+\-]?)(\d{0,2})([\/shdc]+)$', token)
             number = int(match.group(1))
             operator = match.group(2)
             limit = match.group(3)
-            suit = suit_map[match.group(4)]
+            if operator == '':
+                operator = '-'; limit = match.group(1) # "3S" means exactly 3 cards in spades
+            suit = [suit_map[char] for char in match.group(4).split('/')]
+            if any([s in constrained_suits for s in suit]):
+                raise ValueError('Each suit can only have one constraint.')
+            constrained_suits.extend(suit)
+            if len(suit) > 1: permutable_suits.append(suit)
             if operator == '+':
-                shape_min[suit] = max(shape_min[suit], number)
+                shape_min[suit[0]] = max(shape_min[suit[0]], number)
             elif operator == '-':
-                if limit == '': shape_max[suit] = min(shape_max[suit], number)
-                else: shape_min[suit] = max(shape_min[suit], number); shape_max[suit] = min(shape_max[suit], int(limit))
-        return shape_max, shape_min, SuitPermuter(False)
+                if limit == '': shape_max[suit[0]] = min(shape_max[suit[0]], number)
+                else: shape_min[suit[0]] = max(shape_min[suit[0]], number); shape_max[suit[0]] = min(shape_max[suit[0]], int(limit))
+        if len(permutable_suits) == 0: suit_permuter = SuitPermuter(False)
+        elif len(permutable_suits) == 1: 
+            suit_permuter = SuitPermuter(overall = [i in permutable_suits[0] for i in range(4)])
+        elif len(permutable_suits) == 2:
+            suit_permuter = SuitPermuter(overall = [i in permutable_suits[0] for i in range(4)], permute_two_pairs=True)
+        return shape_max, shape_min, suit_permuter
     
     def parse_shape_all(token:str):
         permute_suits = []
@@ -503,9 +554,13 @@ def parse_string(constraint_string: str):
             if char.isdigit():
                 suit_lengths.append(int(char))
                 permute_suits.append(in_bracket)
-        shape_max = np.array(suit_lengths).astype(int); shape_min = np.array(suit_lengths).astype(int)
+        shape_max = np.array(suit_lengths).astype(int)
+        suit_permuter = SuitPermuter(permute_suits)
         assert shape_max.sum() == 13, 'Total cards in shape constraint must sum to 13.'
-        return shape_max, shape_min, SuitPermuter(permute_suits)
+        # deal with shape constraints like (31)(54)
+        if re.match(r'\(\d{2}\)\(\d{2}\)', token):
+            suit_permuter = SuitPermuter([True, True, False, False], permute_two_pairs=True)
+        return shape_max, shape_max, suit_permuter
 
     def parse_shape_ranked(*tokens:str):
         shape_max = np.ones(4)*13; shape_min = np.zeros(4)
@@ -527,10 +582,12 @@ def parse_string(constraint_string: str):
     
     def parse_hcp(token:str, hand: int, current_constraint: HCPConstraint | types.NoneType):
         if current_constraint is None: current_constraint = HCPConstraint()
-        match = re.match(r'^(\d{1,2})([\+\-])(\d{0,2})(hcp|p)$', token)
+        match = re.match(r'^(\d{1,2})([\+\-]?)(\d{0,2})(hcp|p)$', token)
         number = int(match.group(1))
         operator = match.group(2)
         limit = match.group(3)
+        if operator == '':
+            operator = '-'; limit = match.group(1) # "3P" means exactly 3 HCP
         hcp_min = current_constraint.hcp_min.copy(); hcp_max = current_constraint.hcp_max.copy()
         if operator == '+':
             hcp_min[hand] = max(hcp_min[hand], number)
@@ -569,7 +626,7 @@ def parse_string(constraint_string: str):
             if token == 'hascard':
                 given_tokens = constraits[i+1:]
                 break
-            token_type = classify_consition(token)
+            token_type = classify_condition(token)
             if token_type.startswith('shape'):
                 if shape_type is None: shape_type = token_type
                 elif shape_type != token_type:
@@ -929,25 +986,64 @@ class Simulator():
     def __init__(self, constraint = None, given = None, rng = None, dirname = None, **kwargs):
         if dirname != None: self.load(dirname, constraint = constraint, given = given, rng = rng, **kwargs); return
         self.dealer = Dealer(constraint, given, rng = rng, **kwargs)
-        self.deals = []
+        self.deals = MultiHand()
         self.n_deals = 0
         self.dds = None
+
+    def __len__(self): return self.n_deals
 
     def deal(self, n:int = 50000):
         self.deals = MultiHand(self.deals, *self.dealer.deal(n))
         self.n_deals = len(self.deals)
         return self
 
-    def check(self, constraint):
-        passed = constraint.check(self.deals)
+    def check(self, *constraints: Constraint | str, op = 'or'):
+        constraints = list(constraints)
+        for i in range(len(constraints)):
+            if isinstance(constraints[i], str):
+                constraints[i], _ = parse_string(constraints[i])
+        passed = np.stack([constraint.check(self.deals) for constraint in constraints], axis=0)
+        if len(constraints) > 1: passed = passed.any(axis=0) if op == 'or' else passed.all(axis=0)
+        else: passed = passed[0]
         print(f'{sum(passed)}/{self.n_deals}({sum(passed)/self.n_deals:.2f}) deals passed the constraint check.')
         return sum(passed)/self.n_deals
 
-    def subset(self, constraint):
+    def subset(self, *constraints: Constraint | str | np.ndarray, op = 'or'):
+        # to apply the "AND" operator, call the subset function in a chain
+        # defaults to the "OR" operator between constraints
+        constraints = list(constraints)
+        masks = []
+        for i in range(len(constraints)):
+            if isinstance(constraints[i], np.ndarray):
+                masks.append(constraints[i].astype(bool)); continue
+            elif isinstance(constraints[i], str):
+                constraints[i], _ = parse_string(constraints[i])
+            masks.append(constraints[i].check(self.deals))
+
         new_simulator = Simulator()
         new_simulator.dealer = self.dealer
-        new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[constraint.check(self.deals)])
+        mask = np.stack(masks, axis=0)
+        if len(constraints) > 1: mask = mask.any(axis=0) if op == 'or' else mask.all(axis=0)
+        else: mask = mask[0]
+        new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[mask])
         new_simulator.n_deals = len(new_simulator.deals)
+        new_simulator.dds = self.dds[mask] if self.dds is not None else None
+        return new_simulator
+
+    def exclude(self, *constraints: Constraint | str, op = 'or'): 
+        '''op = 'or' means to exclude deals that satisfy any of the constraints'''
+        constraints = list(constraints)
+        for i in range(len(constraints)):
+            if isinstance(constraints[i], str):
+                constraints[i], _ = parse_string(constraints[i])
+        mask = np.stack([constraint.check(self.deals) for constraint in constraints], axis=0)
+        if len(constraints) > 1: mask = mask.any(axis=0) if op == 'or' else mask.all(axis=0)
+        else: mask = mask[0]
+        new_simulator = Simulator()
+        new_simulator.dealer = self.dealer
+        new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[~mask])
+        new_simulator.n_deals = len(new_simulator.deals)
+        new_simulator.dds = self.dds[~mask] if self.dds is not None else None
         return new_simulator
 
     def expectation(self):
@@ -961,8 +1057,8 @@ class Simulator():
         if dirname is None: dirname = input('Please specify a directory name to save simulated deals: ')
         os.makedirs(dirname, exist_ok = True)
         
-        if os.path.isfile(f'{dirname}/deals.pkl'):
-            overwrite = input('deals.pkl already exists in the specified directory. Overwrite? (Y/n): ')
+        if os.path.isfile(f'{dirname}/dealer.pkl'):
+            overwrite = input('dealer.pkl already exists in the specified directory. Overwrite? (Y/n): ')
             if overwrite.lower() == 'n':
                 print('Aborting.'); return
         with open(f'{dirname}/dealer.pkl', 'wb') as f: pickle.dump(self.dealer, f)
