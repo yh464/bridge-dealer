@@ -295,6 +295,12 @@ class HCPConstraint():
             'Max '+ ' '.join([str(x).ljust(5) for x in self.hcp_max]) + '\n' + \
             'Min '+ ' '.join([str(x).ljust(5) for x in self.hcp_min])
 
+    def __and__ (self, other):
+        if other is None: return self.copy()
+        hcp_max = np.minimum(self.hcp_max, other.hcp_max)
+        hcp_min = np.maximum(self.hcp_min, other.hcp_min)
+        return HCPConstraint(hcp_max, hcp_min)
+
     def copy(self):
         return HCPConstraint(self.hcp_max.copy(), self.hcp_min.copy())
 
@@ -334,6 +340,26 @@ class SingleHandShapeConstraint():
                f'Min number of cards: S={self.suit_min[0]}, H={self.suit_min[1]}, D={self.suit_min[2]}, C={self.suit_min[3]}',
                self.permute_suits.__str__()]
         return '\n'.join(out)
+    
+    def __and__(self, other):
+        if other is None: return self.copy()
+        if self.permute_suits.permutable != other.permute_suits.permutable:
+            raise ValueError('Cannot combine shape constraints with different permutable suits.')
+        if isinstance(other, ShapeConstraint):
+            shape_max = other.shape_max.copy()
+            shape_min = other.shape_min.copy()
+            shape_max[self.hand,:] = np.minimum(shape_max[self.hand,:], self.suit_max)
+            shape_min[self.hand,:] = np.maximum(shape_min[self.hand,:], self.suit_min)
+            return ShapeConstraint(shape_max, shape_min, permute_suits = self.permute_suits)
+        elif self.hand != other.hand:
+            return combine_single_hand_shape_constraints(self, other)
+        else:
+            suit_max = np.minimum(self.suit_max, other.suit_max)
+            suit_min = np.maximum(self.suit_min, other.suit_min)
+            return SingleHandShapeConstraint(
+                self.hand, suit_max, suit_min, permute_suits = self.permute_suits
+            )
+    def __rand__(self, other): return self.__and__(other)
 
     def copy(self):
         return SingleHandShapeConstraint(self.hand, self.suit_max.copy(), self.suit_min.copy(), self.permute_suits)
@@ -404,6 +430,22 @@ class ShapeConstraint():
                ', '.join(np.array(['S','H','D','C'])[self.permute_suits.permutable].tolist())]
         return '\n'.join(out)
 
+    def __and__(self, other):
+        if other is None: return self.copy()
+        if self.permute_suits.permutable != other.permute_suits.permutable:
+            raise ValueError('Cannot combine shape constraints with different permutable suits.')
+        if isinstance(other, SingleHandShapeConstraint):
+            shape_max = self.shape_max.copy()
+            shape_min = self.shape_min.copy()
+            shape_max[other.hand,:] = np.minimum(shape_max[other.hand,:], other.suit_max)
+            shape_min[other.hand,:] = np.maximum(shape_min[other.hand,:], other.suit_min)
+            return ShapeConstraint(shape_max, shape_min, permute_suits = self.permute_suits)
+        else:
+            shape_max = np.minimum(self.shape_max, other.shape_max)
+            shape_min = np.maximum(self.shape_min, other.shape_min)
+            return ShapeConstraint(shape_max, shape_min, permute_suits = self.permute_suits)
+    def __rand__(self, other): return self.__and__(other)
+
     def copy(self):
         return ShapeConstraint(self.shape_max.copy(), self.shape_min.copy(), self.permute_suits)
 
@@ -417,13 +459,27 @@ class ShapeConstraint():
         return out
 
 class Constraint():
-    def __init__(
-        self,
-        shape_constraint : ShapeConstraint | SingleHandShapeConstraint | types.NoneType = None,
-        hcp_constraint : HCPConstraint | types.NoneType = None,
-        given : Hand | np.ndarray | types.NoneType = None,
-        **kwargs
-    ):
+    def __init__(self, *args, **kwargs):
+        shape_constraint = None; hcp_constraint = None; given = None
+        for arg in args:
+            if isinstance(arg, Constraint): # overrides all other arguments
+                self.shape_constraint = arg.shape_constraint
+                self.hcp_constraint = arg.hcp_constraint
+                self.given = arg.given
+                if len(args) > 1 or len(kwargs) > 0:
+                    warnings.warn('When passing a Constraint instance, all other arguments are ignored.')
+                return
+            elif isinstance(arg, (ShapeConstraint, SingleHandShapeConstraint)):
+                shape_constraint = arg
+            elif isinstance(arg, HCPConstraint):
+                hcp_constraint = arg
+            elif isinstance(arg, Hand) or isinstance(arg, np.ndarray):
+                given = Hand(arg)
+            # other types are ignored
+        shape_constraint = kwargs.pop('shape_constraint', shape_constraint)
+        hcp_constraint = kwargs.pop('hcp_constraint', hcp_constraint)
+        given = kwargs.pop('given', given)
+
         if shape_constraint is not None: self.shape_constraint = shape_constraint
         elif len(kwargs) > 0: self.shape_constraint = ShapeConstraint(**kwargs)
         else: self.shape_constraint = None
@@ -436,7 +492,11 @@ class Constraint():
         self.no_hcp_cond = self.hcp_constraint is None or self.hcp_constraint.no_hcp_cond
         self.permute_suits = self.shape_constraint.permute_suits if self.shape_constraint is not None else SuitPermuter()
 
-    def __str__(self): return self.shape_constraint.__str__() + '\n\n' + self.hcp_constraint.__str__()
+        self.inverted = False
+
+    def __str__(self): 
+        logical_str = 'EXCLUDING:' if self.inverted else 'INCLUDING:'
+        return logical_str + '\n' + self.shape_constraint.__str__() + '\n\n' + self.hcp_constraint.__str__()
 
     def __setattr__(self, name, value):
         if name == 'no_shape_cond' and (self.shape_constraint is None or self.shape_constraint.no_shape_cond) != value:
@@ -459,10 +519,22 @@ class Constraint():
         else:
             super().__setattr__(name, value)
 
+    def __and__(self, other):
+        if other is None: return self.copy()
+        return ConstraintSet(self, other, op = 'and').flatten()
+    def __rand__(self, other): return self.__and__(other)
+    def __or__(self, other):
+        if other is None: return Constraint() # empty constraint
+        return ConstraintSet(self, other, op = 'or').flatten()
+    def __ror__(self, other): return self.__or__(other)
+    
+    def invert(self): self.inverted = not self.inverted; return self
+
     def copy(self):
         return Constraint(
             self.shape_constraint.copy() if self.shape_constraint is not None else None,
-            self.hcp_constraint.copy() if self.hcp_constraint is not None else None
+            self.hcp_constraint.copy() if self.hcp_constraint is not None else None,
+            self.given.copy() if self.given is not None else None
         )
 
     def check(self, hand: Hand | MultiHand):
@@ -474,7 +546,92 @@ class Constraint():
         else: given_pass = True
         out = shape_pass & hcp_pass & given_pass
         if isinstance(out, bool) and isinstance(hand, MultiHand): out = np.repeat(out, hand.n_hands)
+        if self.inverted: out = np.logical_not(out)
         return out
+
+class ConstraintSet(Constraint):
+    def __new__(cls, *constraints, **_):
+        if len(constraints) == 0:
+            return Constraint()
+        elif len(constraints) == 1:
+            return constraints[0]
+        return super().__new__(cls)
+    
+    def __init__(self, 
+                *constraints, 
+                op = 'or'):
+        constraints_list = []
+        for constraint in constraints:
+            if constraint is None: continue
+            elif isinstance(constraint, (Constraint, ConstraintSet)): constraints_list.append(constraint)
+            elif isinstance(constraint, (ShapeConstraint, SingleHandShapeConstraint, HCPConstraint, Hand)):
+                constraints_list.append(Constraint(constraint))
+            else: raise ValueError('Cannot add object of type '+str(type(constraint))+' to ConstraintSet.')
+        self.constraints = constraints_list
+        if op not in ['or','and']: raise ValueError("The logical operator must be either 'or' or 'and'.")
+        self.op = np.logical_or if op == 'or' else np.logical_and
+
+    def __len__(self): return len(self.constraints)
+    def __getitem__(self, idx): return self.constraints[idx]
+    def __iter__(self):
+        for constraint in self.constraints:
+            yield constraint
+
+    def __str__(self):
+        out = '\n{\n' + (' OR ' if self.op == np.logical_or else ' AND ').join(
+            [f'({c.__str__()})' for c in self.constraints]) + '\n}\n'
+        return out
+
+    def invert(self):
+        self.op = np.logical_and if self.op == np.logical_or else np.logical_or
+        for i, constraint in enumerate(self.constraints):
+            self.constraints[i] = constraint.invert()
+        return self
+
+    def flatten(self):
+        new_constraints = []
+        for constraint in self.constraints:
+            if isinstance(constraint, ConstraintSet) and constraint.op == self.op:
+                tmp = constraint.flatten()
+                new_constraints.extend(tmp.constraints)
+            else: new_constraints.append(constraint)
+        self.constraints = new_constraints
+
+        # combine constraints if possible
+        if (self.op == np.logical_and and all([not isinstance(c, ConstraintSet) for c in new_constraints]) and all([not c.invert for c in new_constraints])) or \
+            (self.op == np.logical_or and all([not isinstance(c, ConstraintSet) for c in new_constraints]) and all([c.invert for c in new_constraints])):
+            shape_constraint = None; hcp_constraint = None; given = None
+            for constraint in new_constraints:
+                if constraint.shape_constraint is not None:
+                    shape_constraint = constraint.shape_constraint & shape_constraint
+                if constraint.hcp_constraint is not None:
+                    hcp_constraint = constraint.hcp_constraint & hcp_constraint
+                if constraint.given is not None:
+                    if given is None: given = constraint.given.copy()
+                    else:
+                        given = np.logical_or(given.array_rep, constraint.given.array_rep)
+                        if (given.sum(axis = 0) > 1).any():
+                            raise ValueError('Conflicting given cards in combined constraints.')
+                        given = Hand(given)
+            out = Constraint(shape_constraint, hcp_constraint, given)
+            if self.op == np.logical_or: out = out.invert()
+            return out
+        return self
+
+    def check(self, hand: Hand | MultiHand):
+        if len(self.constraints) == 0:
+            if isinstance(hand, Hand): return True
+            else: return np.ones(hand.n_hands).astype('?')
+        out = []
+        for constraint in self.constraints:
+            out.append(constraint.check(hand))
+        out = np.stack(out)
+        out = self.op(out, axis = 0)
+        if self.invert: out = np.logical_not(out)
+        return out
+
+    def copy(self):
+        return ConstraintSet(*[c.copy() for c in self.constraints])
 
 class DDSConstraint():
     def __init__(
@@ -680,13 +837,13 @@ class Dealer():
             **kwargs
         ):
         if isinstance(constraint, Constraint): self.constraint = constraint
-        elif isinstance(constraint, (ShapeConstraint, SingleHandShapeConstraint)): 
-            self.constraint = Constraint(shape_constraint = constraint, **kwargs)
-        elif isinstance(constraint, HCPConstraint): 
-            self.constraint = Constraint(hcp_constraint = constraint, **kwargs)
+        elif isinstance(constraint, (ShapeConstraint, SingleHandShapeConstraint , HCPConstraint)):
+            self.constraint = Constraint(constraint)
+        elif isinstance(constraint, ConstraintSet):
+            raise ValueError('Dealer cannot accept ConstraintSet; please select a single Constraint.')
         else: self.constraint = Constraint(**kwargs)
 
-        if constraint.given is not None: self.partial_deal = Hand(given = constraint.given)
+        if constraint is not None and constraint.given is not None: self.partial_deal = Hand(given = constraint.given)
         else: self.partial_deal = Hand()
 
         self.hcp_exact = hcp_exact
@@ -1011,50 +1168,37 @@ class Simulator():
         self.n_deals = len(self.deals)
         return self
 
-    def check(self, *constraints: Constraint | str, op = 'or'):
-        constraints = list(constraints)
-        for i in range(len(constraints)):
-            if isinstance(constraints[i], str):
-                constraints[i], _ = parse_string(constraints[i])
-        passed = np.stack([constraint.check(self.deals) for constraint in constraints], axis=0)
-        if len(constraints) > 1: passed = passed.any(axis=0) if op == 'or' else passed.all(axis=0)
-        else: passed = passed[0]
-        print(f'{sum(passed)}/{self.n_deals}({sum(passed)/self.n_deals:.2f}) deals passed the constraint check.')
-        return sum(passed)/self.n_deals
-
-    def subset(self, *constraints: Constraint | str | np.ndarray, op = 'or'):
-        # to apply the "AND" operator, call the subset function in a chain
-        # defaults to the "OR" operator between constraints
+    def check(self, *constraints: Constraint | str | np.ndarray):
         constraints = list(constraints)
         masks = []
         for i in range(len(constraints)):
-            if isinstance(constraints[i], np.ndarray):
-                masks.append(constraints[i].astype(bool)); continue
-            elif isinstance(constraints[i], str):
+            if isinstance(constraints[i], str):
                 constraints[i], _ = parse_string(constraints[i])
+            elif isinstance(constraints[i], np.ndarray):
+                masks.append(constraints[i].astype(bool)); continue
             masks.append(constraints[i].check(self.deals))
+        passed = np.stack(masks, axis=0)
+        if len(constraints) > 1: passed = passed.any(axis=0)
+        else: passed = passed[0]
+        print(f'{sum(passed)}/{self.n_deals}({sum(passed)/self.n_deals:.2f}) deals passed the constraint check.')
+        return passed
 
+    def subset(self, *constraints: Constraint | str | np.ndarray):
+        # to apply the "AND" operator, call the subset function in a chain
+        # defaults to the "OR" operator between constraints
         new_simulator = Simulator()
-        new_simulator.dealer = self.dealer
-        mask = np.stack(masks, axis=0)
-        if len(constraints) > 1: mask = mask.any(axis=0) if op == 'or' else mask.all(axis=0)
-        else: mask = mask[0]
+        new_simulator.dealer = self.dealer; new_simulator.dealer.constraint = ConstraintSet(*constraints) & self.dealer.constraint
+        mask = self.check(*constraints)
         new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[mask])
         new_simulator.n_deals = len(new_simulator.deals)
         new_simulator.dds = self.dds[mask] if self.dds is not None else None
         return new_simulator
 
-    def exclude(self, *constraints: Constraint | str, op = 'or'): 
+    def exclude(self, *constraints: Constraint | str | np.ndarray): 
         '''op = 'or' means to exclude deals that satisfy any of the constraints'''
-        constraints = list(constraints)
-        for i in range(len(constraints)):
-            if isinstance(constraints[i], str):
-                constraints[i], _ = parse_string(constraints[i])
-        mask = np.stack([constraint.check(self.deals) for constraint in constraints], axis=0)
-        if len(constraints) > 1: mask = mask.any(axis=0) if op == 'or' else mask.all(axis=0)
-        else: mask = mask[0]
         new_simulator = Simulator()
-        new_simulator.dealer = self.dealer
+        new_simulator.dealer = self.dealer; new_simulator.dealer.constraint = ConstraintSet(*constraints).invert() & self.dealer.constraint
+        mask = self.check(*constraints)
         new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[~mask])
         new_simulator.n_deals = len(new_simulator.deals)
         new_simulator.dds = self.dds[~mask] if self.dds is not None else None
@@ -1092,6 +1236,7 @@ class Simulator():
         if os.path.isfile(f'{dirname}/dealer.pkl'):
             warnings.warn('Loading dealer.pkl from the specified directory. Ignoring other parameters for the dealer.')
             with open(f'{dirname}/dealer.pkl', 'rb') as f: self.dealer = pickle.load(f)
+            self.dealer.rng = kwargs.get('rng', np.random.default_rng()) # need to reset rng for further dealing
         else:
             warnings.warn('dealer.pkl not found in the specified directory. Specifying dealer with other parameters.')
             self.dealer = Dealer(**kwargs)
