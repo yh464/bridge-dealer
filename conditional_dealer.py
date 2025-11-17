@@ -554,7 +554,7 @@ class ConstraintSet(Constraint):
         if len(constraints) == 0:
             return Constraint()
         elif len(constraints) == 1:
-            return constraints[0]
+            return constraints[0].copy()
         return super().__new__(cls)
     
     def __init__(self, 
@@ -569,7 +569,7 @@ class ConstraintSet(Constraint):
             else: raise ValueError('Cannot add object of type '+str(type(constraint))+' to ConstraintSet.')
         self.constraints = constraints_list
         if op not in ['or','and']: raise ValueError("The logical operator must be either 'or' or 'and'.")
-        self.op = np.logical_or if op == 'or' else np.logical_and
+        self.op = np.any if op == 'or' else np.all
 
     def __len__(self): return len(self.constraints)
     def __getitem__(self, idx): return self.constraints[idx]
@@ -578,12 +578,12 @@ class ConstraintSet(Constraint):
             yield constraint
 
     def __str__(self):
-        out = '\n{\n' + (' OR ' if self.op == np.logical_or else ' AND ').join(
+        out = '\n{\n' + (' OR ' if self.op == np.any else ' AND ').join(
             [f'({c.__str__()})' for c in self.constraints]) + '\n}\n'
         return out
 
     def invert(self):
-        self.op = np.logical_and if self.op == np.logical_or else np.logical_or
+        self.op = np.all if self.op == np.any else np.any
         for i, constraint in enumerate(self.constraints):
             self.constraints[i] = constraint.invert()
         return self
@@ -598,8 +598,12 @@ class ConstraintSet(Constraint):
         self.constraints = new_constraints
 
         # combine constraints if possible
-        if (self.op == np.logical_and and all([not isinstance(c, ConstraintSet) for c in new_constraints]) and all([not c.invert for c in new_constraints])) or \
-            (self.op == np.logical_or and all([not isinstance(c, ConstraintSet) for c in new_constraints]) and all([c.invert for c in new_constraints])):
+        if (self.op == np.all and 
+                all([not isinstance(c, ConstraintSet) for c in new_constraints]) and 
+                all([not c.inverted for c in new_constraints])) or \
+            (self.op == np.any and 
+                all([not isinstance(c, ConstraintSet) for c in new_constraints]) and 
+                all([c.inverted for c in new_constraints])):
             shape_constraint = None; hcp_constraint = None; given = None
             for constraint in new_constraints:
                 if constraint.shape_constraint is not None:
@@ -614,7 +618,7 @@ class ConstraintSet(Constraint):
                             raise ValueError('Conflicting given cards in combined constraints.')
                         given = Hand(given)
             out = Constraint(shape_constraint, hcp_constraint, given)
-            if self.op == np.logical_or: out = out.invert()
+            if self.op == np.any: out = out.invert()
             return out
         return self
 
@@ -627,7 +631,6 @@ class ConstraintSet(Constraint):
             out.append(constraint.check(hand))
         out = np.stack(out)
         out = self.op(out, axis = 0)
-        if self.invert: out = np.logical_not(out)
         return out
 
     def copy(self):
@@ -1173,7 +1176,7 @@ class Simulator():
         masks = []
         for i in range(len(constraints)):
             if isinstance(constraints[i], str):
-                constraints[i], _ = parse_string(constraints[i])
+                constraints[i] = parse_string(constraints[i])
             elif isinstance(constraints[i], np.ndarray):
                 masks.append(constraints[i].astype(bool)); continue
             masks.append(constraints[i].check(self.deals))
@@ -1187,7 +1190,9 @@ class Simulator():
         # to apply the "AND" operator, call the subset function in a chain
         # defaults to the "OR" operator between constraints
         new_simulator = Simulator()
-        new_simulator.dealer = self.dealer; new_simulator.dealer.constraint = ConstraintSet(*constraints) & self.dealer.constraint
+        new_simulator.dealer = self.dealer
+        old_constraint = None if self.dealer.constraint is None else self.dealer.constraint.copy()
+        new_simulator.dealer.constraint = ConstraintSet(*constraints) & old_constraint
         mask = self.check(*constraints)
         new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[mask])
         new_simulator.n_deals = len(new_simulator.deals)
@@ -1197,7 +1202,9 @@ class Simulator():
     def exclude(self, *constraints: Constraint | str | np.ndarray): 
         '''op = 'or' means to exclude deals that satisfy any of the constraints'''
         new_simulator = Simulator()
-        new_simulator.dealer = self.dealer; new_simulator.dealer.constraint = ConstraintSet(*constraints).invert() & self.dealer.constraint
+        new_simulator.dealer = self.dealer
+        old_constraint = None if self.dealer.constraint is None else self.dealer.constraint.copy()
+        new_simulator.dealer.constraint = ~(ConstraintSet(*constraints)) & old_constraint
         mask = self.check(*constraints)
         new_simulator.deals = MultiHand(array_rep = self.deals.array_rep[~mask])
         new_simulator.n_deals = len(new_simulator.deals)
