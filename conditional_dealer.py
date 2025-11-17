@@ -906,11 +906,9 @@ class Dealer():
         avail_to_restricted_hand = []
         for suit in range(4):
             available_cards = np.where(~hand.array_rep[:,suit,:].any(axis=0))[0]
-            if constraint.suit_max[suit] == 13: 
-                avail_to_restricted_hand.append(np.stack((np.ones(len(available_cards))*suit,
-                                                          available_cards)).T)
             self.rng.shuffle(available_cards)
             n_avail_to_restricted_hand = constraint.suit_max[suit] - hand.array_rep[constraint.hand, suit,:].sum(dtype = np.int8)
+            n_avail_to_restricted_hand = min(n_avail_to_restricted_hand, len(available_cards))
             avail_to_restricted_hand.append(np.stack((np.ones(n_avail_to_restricted_hand)*suit, 
                                                       available_cards[:n_avail_to_restricted_hand])).T)
         
