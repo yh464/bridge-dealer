@@ -1259,7 +1259,7 @@ class Simulator():
             
         if not os.path.isfile(f'{dirname}/deals.npy'):
             warnings.warn('deals.npy not found in the specified directory. No deals loaded.')
-            self.deals = Hand()
+            self.deals = MultiHand()
         else:
             deals = np.load(f'{dirname}/deals.npy')
             deals = np.unpackbits(deals, count = deals.size*8 - (deals.size*8)%156).reshape((-1,3,4,13)).astype(bool)
