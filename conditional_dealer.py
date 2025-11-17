@@ -551,10 +551,18 @@ class Constraint():
 
 class ConstraintSet(Constraint):
     def __new__(cls, *constraints, **_):
-        if len(constraints) == 0:
+        non_empty_constraints = []
+        for constraint in constraints:
+            if constraint is None or (isinstance(constraint, Constraint) and not isinstance(constraint, ConstraintSet) and
+                (constraint.no_hcp_cond and constraint.no_shape_cond and constraint.given is None)): continue
+            elif isinstance(constraint, (Constraint, ConstraintSet)): non_empty_constraints.append(constraint)
+            elif isinstance(constraint, (ShapeConstraint, SingleHandShapeConstraint, HCPConstraint, Hand)):
+                non_empty_constraints.append(Constraint(constraint))
+            else: raise ValueError('Cannot add object of type '+str(type(constraint))+' to ConstraintSet.')
+        if len(non_empty_constraints) == 0:
             return Constraint()
-        elif len(constraints) == 1:
-            return constraints[0].copy()
+        elif len(non_empty_constraints) == 1:
+            return non_empty_constraints[0].copy()
         return super().__new__(cls)
     
     def __init__(self, 
@@ -562,7 +570,8 @@ class ConstraintSet(Constraint):
                 op = 'or'):
         constraints_list = []
         for constraint in constraints:
-            if constraint is None: continue
+            if constraint is None or (isinstance(constraint, Constraint) and not isinstance(constraint, ConstraintSet) and
+                (constraint.no_hcp_cond and constraint.no_shape_cond and constraint.given is None)): continue
             elif isinstance(constraint, (Constraint, ConstraintSet)): constraints_list.append(constraint)
             elif isinstance(constraint, (ShapeConstraint, SingleHandShapeConstraint, HCPConstraint, Hand)):
                 constraints_list.append(Constraint(constraint))
